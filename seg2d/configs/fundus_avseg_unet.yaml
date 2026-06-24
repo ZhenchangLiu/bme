@@ -1,0 +1,51 @@
+project:
+  name: fundus_avseg_unet
+  seed: 42
+
+data:
+  root: seg2d/data/Fundus-AVSeg
+  image_dir: images
+  mask_dir: annotation
+  train_split: training.txt
+  test_split: testing.txt
+  val_fraction: 0.1
+  image_size: [512, 512]
+  ignore_index: 4
+
+classes:
+  - id: 0
+    name: background
+    color: [0, 0, 0]
+  - id: 1
+    name: artery
+    color: [255, 0, 0]
+  - id: 2
+    name: vein
+    color: [0, 0, 255]
+  - id: 3
+    name: crossing
+    color: [0, 255, 0]
+  - id: 4
+    name: uncertain
+    color: [255, 255, 255]
+
+model:
+  name: unet
+  in_channels: 3
+  num_classes: 5
+  base_channels: 64
+  bilinear: true
+
+train:
+  epochs: 100
+  batch_size: 4
+  num_workers: 4
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  loss:
+    ce_weight: 1.0
+    dice_weight: 1.0
+
+output:
+  root: seg2d/outputs/fundus_avseg_unet
+  checkpoint_dir: seg2d/checkpoints/fundus_avseg_unet

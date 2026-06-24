@@ -1,1 +1,10 @@
 .DS_Store
+
+# Local datasets and experiment artifacts
+seg2d/data/Fundus-AVSeg/
+seg2d/data/*.zip
+seg2d/checkpoints/
+seg2d/outputs/
+seg2d/runs/
+*.pt
+*.pth

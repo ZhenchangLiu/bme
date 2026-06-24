@@ -1,10 +1,52 @@
 # 2D Image Segmentation
 
-This directory will contain code for 2D medical image segmentation.
+This directory contains the 2D medical image segmentation pipeline.
 
-Planned scope:
+The first target dataset is Fundus-AVSeg, a public retinal artery-vein vessel
+segmentation dataset. The initial implementation will use a hand-written PyTorch
+U-Net instead of `segmentation_models_pytorch` or similar model libraries.
 
-- Dataset loading and preprocessing for 2D image-mask pairs.
-- Model definitions for 2D segmentation.
-- Training, validation, inference, and evaluation scripts.
-- Experiment configuration and reproducibility utilities.
+## Planned Layout
+
+```text
+seg2d/
+  configs/
+    fundus_avseg_unet.yaml
+  data/
+    README.md
+  scripts/
+    inspect_fundus_avseg.py
+    train.py
+    evaluate.py
+    predict.py
+  seg2d/
+    datasets/
+    losses/
+    metrics/
+    models/
+    utils/
+```
+
+## Dataset
+
+Expected local dataset layout:
+
+```text
+seg2d/data/Fundus-AVSeg/
+  images/
+  annotation/
+  metadata.xlsx
+  training.txt
+  testing.txt
+```
+
+Annotation colors:
+
+- `0`: background, black
+- `1`: artery, red
+- `2`: vein, blue
+- `3`: artery-vein crossing, green
+- `4`: uncertain vessel, white
+
+The initial training plan is to use the official training/testing split and
+derive a validation split from the official training list.
