@@ -1,6 +1,6 @@
-# Local Data
+# Data
 
-Place the downloaded Fundus-AVSeg dataset here:
+Fundus-AVSeg is stored in this repository through Git LFS.
 
 ```text
 seg2d/data/Fundus-AVSeg/
@@ -11,7 +11,12 @@ seg2d/data/Fundus-AVSeg/
   testing.txt
 ```
 
-The dataset zip and extracted data are ignored by git.
+The original zip file is ignored by git to avoid storing both the archive and
+the extracted dataset. The downloaded archive was verified with:
+
+```text
+MD5: 20c85c9343ff95435f131b684afadd50
+```
 
 Official dataset page:
 

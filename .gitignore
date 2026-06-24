@@ -5,7 +5,6 @@ __pycache__/
 *.py[cod]
 
 # Local datasets and experiment artifacts
-seg2d/data/Fundus-AVSeg/
 seg2d/data/*.zip
 seg2d/checkpoints/
 seg2d/outputs/
