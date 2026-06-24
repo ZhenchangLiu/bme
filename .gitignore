@@ -1,5 +1,9 @@
 .DS_Store
 
+# Python cache
+__pycache__/
+*.py[cod]
+
 # Local datasets and experiment artifacts
 seg2d/data/Fundus-AVSeg/
 seg2d/data/*.zip
