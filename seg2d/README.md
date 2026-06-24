@@ -50,3 +50,11 @@ Annotation colors:
 
 The initial training plan is to use the official training/testing split and
 derive a validation split from the official training list.
+
+Implemented dataset utilities:
+
+- `seg2d.utils.mask`: RGB annotation to class-id mask conversion.
+- `seg2d.datasets.fundus_avseg`: official split loading and PyTorch dataset adapter.
+
+With `val_fraction: 0.1`, the official 80 training images are split into 72
+training images and 8 validation images using the configured seed.
