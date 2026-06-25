@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import random
 import sys
 from pathlib import Path
@@ -59,15 +60,17 @@ def run_training(
     limit_val_batches: int | None = None,
 ) -> dict[str, Any]:
     import torch
+    from torch.nn.parallel import DistributedDataParallel
 
     from seg2d.losses import CrossEntropyDiceLoss
     from seg2d.models import build_unet
 
+    dist_info = setup_distributed(device_arg)
     seed = int(config["project"].get("seed", 42))
     set_seed(seed)
-    device = make_device(device_arg)
+    device = dist_info["device"]
 
-    train_loader, val_loader = build_dataloaders(config)
+    train_loader, val_loader, train_sampler = build_dataloaders(config, distributed=dist_info["enabled"])
     model_config = config["model"]
     model = build_unet(
         in_channels=int(model_config.get("in_channels", 3)),
@@ -108,16 +111,24 @@ def run_training(
         start_epoch = int(checkpoint["epoch"]) + 1
         best_vessel_dice = float(checkpoint.get("best_vessel_dice", best_vessel_dice))
 
+    if dist_info["enabled"]:
+        device_ids = [dist_info["local_rank"]] if device.type == "cuda" else None
+        model = DistributedDataParallel(model, device_ids=device_ids)
+
     output_config = config["output"]
     output_dir = resolve_path(output_config["root"])
     checkpoint_dir = resolve_path(output_config["checkpoint_dir"])
-    output_dir.mkdir(parents=True, exist_ok=True)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if is_main_process(dist_info):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    distributed_barrier(dist_info)
     history_path = output_dir / "history.csv"
 
     epochs = int(train_config["epochs"])
     last_metrics: dict[str, Any] = {}
     for epoch in range(start_epoch, epochs + 1):
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
         train_metrics = train_one_epoch(
             model=model,
             loader=train_loader,
@@ -128,6 +139,7 @@ def run_training(
             ignore_index=int(data_config["ignore_index"]),
             scaler=scaler,
             amp_enabled=amp_enabled,
+            dist_info=dist_info,
             max_batches=limit_train_batches,
         )
         val_metrics = evaluate(
@@ -138,6 +150,7 @@ def run_training(
             num_classes=int(model_config.get("num_classes", 5)),
             ignore_index=int(data_config["ignore_index"]),
             amp_enabled=amp_enabled,
+            dist_info=dist_info,
             max_batches=limit_val_batches,
         )
         step_scheduler(scheduler, val_metrics)
@@ -149,7 +162,7 @@ def run_training(
 
         checkpoint = {
             "epoch": epoch,
-            "model": model.state_dict(),
+            "model": unwrap_model(model).state_dict(),
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict() if scheduler is not None else None,
             "scaler": scaler.state_dict() if amp_enabled else None,
@@ -158,37 +171,44 @@ def run_training(
             "train_metrics": train_metrics,
             "val_metrics": val_metrics,
         }
-        save_checkpoint(checkpoint, checkpoint_dir / "last.pt")
-        if is_best:
-            save_checkpoint(checkpoint, checkpoint_dir / "best.pt")
+        if is_main_process(dist_info):
+            save_checkpoint(checkpoint, checkpoint_dir / "last.pt")
+            if is_best:
+                save_checkpoint(checkpoint, checkpoint_dir / "best.pt")
 
-        maybe_save_val_predictions(
-            model=model,
-            loader=val_loader,
-            device=device,
-            output_dir=output_dir,
-            epoch=epoch,
-            config=config,
-            amp_enabled=amp_enabled,
-        )
+            maybe_save_val_predictions(
+                model=unwrap_model(model),
+                loader=val_loader,
+                device=device,
+                output_dir=output_dir,
+                epoch=epoch,
+                config=config,
+                amp_enabled=amp_enabled,
+            )
 
-        row = flatten_history(epoch, train_metrics, val_metrics, best_vessel_dice, learning_rate)
-        append_history(history_path, row)
-        print(format_epoch(epoch, epochs, train_metrics, val_metrics, best_vessel_dice, learning_rate))
+            row = flatten_history(epoch, train_metrics, val_metrics, best_vessel_dice, learning_rate)
+            append_history(history_path, row)
+            print(format_epoch(epoch, epochs, train_metrics, val_metrics, best_vessel_dice, learning_rate))
+        distributed_barrier(dist_info)
         last_metrics = {"train": train_metrics, "val": val_metrics, "best_vessel_dice": best_vessel_dice}
 
-    return {
+    result = {
         "model": model,
         "optimizer": optimizer,
         "last_metrics": last_metrics,
         "checkpoint_dir": checkpoint_dir,
         "output_dir": output_dir,
+        "dist": dist_info,
     }
+    distributed_barrier(dist_info)
+    cleanup_distributed(dist_info)
+    return result
 
 
-def build_dataloaders(config: dict[str, Any]):
+def build_dataloaders(config: dict[str, Any], distributed: bool = False):
     import torch
     from torch.utils.data import DataLoader
+    from torch.utils.data.distributed import DistributedSampler
 
     from seg2d.datasets import FundusAVSegDataset
     from seg2d.datasets.transforms import build_train_transform
@@ -222,11 +242,17 @@ def build_dataloaders(config: dict[str, Any]):
         seed=seed,
         return_meta=False,
     )
+    train_sampler = (
+        DistributedSampler(train_dataset, shuffle=True, seed=seed, drop_last=False)
+        if distributed
+        else None
+    )
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=train_sampler is None,
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
         generator=generator,
@@ -238,7 +264,7 @@ def build_dataloaders(config: dict[str, Any]):
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
     )
-    return train_loader, val_loader
+    return train_loader, val_loader, train_sampler
 
 
 def train_one_epoch(
@@ -251,6 +277,7 @@ def train_one_epoch(
     ignore_index: int | None,
     scaler,
     amp_enabled: bool,
+    dist_info: dict[str, Any] | None = None,
     max_batches: int | None = None,
 ) -> dict[str, Any]:
     import torch
@@ -290,6 +317,16 @@ def train_one_epoch(
         with torch.no_grad():
             update_confusions(logits, masks, confusion, vessel_confusion, num_classes, ignore_index)
 
+    total_loss, total_ce, total_dice_loss, total_samples = reduce_epoch_state(
+        total_loss=total_loss,
+        total_ce=total_ce,
+        total_dice_loss=total_dice_loss,
+        total_samples=total_samples,
+        confusion=confusion,
+        vessel_confusion=vessel_confusion,
+        device=device,
+        dist_info=dist_info,
+    )
     return summarize_epoch(
         total_loss,
         total_ce,
@@ -310,6 +347,7 @@ def evaluate(
     num_classes: int,
     ignore_index: int | None,
     amp_enabled: bool = False,
+    dist_info: dict[str, Any] | None = None,
     max_batches: int | None = None,
 ) -> dict[str, Any]:
     import torch
@@ -340,6 +378,16 @@ def evaluate(
 
             update_confusions(logits, masks, confusion, vessel_confusion, num_classes, ignore_index)
 
+    total_loss, total_ce, total_dice_loss, total_samples = reduce_epoch_state(
+        total_loss=total_loss,
+        total_ce=total_ce,
+        total_dice_loss=total_dice_loss,
+        total_samples=total_samples,
+        confusion=confusion,
+        vessel_confusion=vessel_confusion,
+        device=device,
+        dist_info=dist_info,
+    )
     return summarize_epoch(
         total_loss,
         total_ce,
@@ -405,6 +453,40 @@ def summarize_epoch(
         "vessel_iou": vessel_iou,
         "samples": total_samples,
     }
+
+
+def reduce_epoch_state(
+    total_loss: float,
+    total_ce: float,
+    total_dice_loss: float,
+    total_samples: int,
+    confusion: dict[str, Any],
+    vessel_confusion: dict[str, Any],
+    device,
+    dist_info: dict[str, Any] | None,
+) -> tuple[float, float, float, int]:
+    if not dist_info or not dist_info.get("enabled", False):
+        return total_loss, total_ce, total_dice_loss, total_samples
+
+    import torch
+    import torch.distributed as dist
+
+    totals = torch.tensor(
+        [total_loss, total_ce, total_dice_loss, float(total_samples)],
+        dtype=torch.float64,
+        device=device,
+    )
+    dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+    for bucket in (confusion, vessel_confusion):
+        for value in bucket.values():
+            dist.all_reduce(value, op=dist.ReduceOp.SUM)
+
+    return (
+        float(totals[0].item()),
+        float(totals[1].item()),
+        float(totals[2].item()),
+        int(totals[3].item()),
+    )
 
 
 def make_confusion(num_classes: int, device):
@@ -593,6 +675,71 @@ def make_device(device_arg: str | None):
     if device_arg is not None:
         return torch.device(device_arg)
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def setup_distributed(device_arg: str | None) -> dict[str, Any]:
+    import torch
+    import torch.distributed as dist
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    if world_size <= 1:
+        return {
+            "enabled": False,
+            "rank": 0,
+            "local_rank": 0,
+            "world_size": 1,
+            "device": make_device(device_arg),
+            "backend": None,
+        }
+
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    if backend == "nccl":
+        torch.cuda.set_device(local_rank)
+        device = torch.device("cuda", local_rank)
+    else:
+        device = make_device(device_arg)
+
+    if not dist.is_initialized():
+        dist.init_process_group(backend=backend, init_method="env://")
+
+    return {
+        "enabled": True,
+        "rank": rank,
+        "local_rank": local_rank,
+        "world_size": world_size,
+        "device": device,
+        "backend": backend,
+    }
+
+
+def is_main_process(dist_info: dict[str, Any] | None) -> bool:
+    return dist_info is None or int(dist_info.get("rank", 0)) == 0
+
+
+def distributed_barrier(dist_info: dict[str, Any] | None) -> None:
+    if not dist_info or not dist_info.get("enabled", False):
+        return
+
+    import torch.distributed as dist
+
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+
+
+def cleanup_distributed(dist_info: dict[str, Any] | None) -> None:
+    if not dist_info or not dist_info.get("enabled", False):
+        return
+
+    import torch.distributed as dist
+
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
+
+
+def unwrap_model(model):
+    return model.module if hasattr(model, "module") else model
 
 
 def make_grad_scaler(device, enabled: bool):

@@ -95,6 +95,14 @@ Start baseline training:
 PYTHONPATH=seg2d python seg2d/scripts/train.py --config seg2d/configs/fundus_avseg_unet.yaml
 ```
 
+Run 8-GPU distributed training:
+
+```bash
+PYTHONPATH=seg2d torchrun --standalone --nproc_per_node=8 \
+  seg2d/scripts/train.py \
+  --config seg2d/configs/fundus_avseg_unet.yaml
+```
+
 The default training config enables paired augmentation, CUDA AMP, cosine LR
 scheduling, richer CSV metrics, and validation prediction overlays.
 

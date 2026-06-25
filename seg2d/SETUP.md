@@ -105,6 +105,31 @@ Default config run:
 PYTHONPATH=seg2d python seg2d/scripts/train.py --config seg2d/configs/fundus_avseg_unet.yaml
 ```
 
+8-GPU distributed smoke run:
+
+```bash
+PYTHONPATH=seg2d torchrun --standalone --nproc_per_node=8 \
+  seg2d/scripts/train.py \
+  --epochs 1 \
+  --batch-size 1 \
+  --num-workers 0 \
+  --limit-train-batches 1 \
+  --limit-val-batches 1
+```
+
+8-GPU distributed full run:
+
+```bash
+PYTHONPATH=seg2d torchrun --standalone --nproc_per_node=8 \
+  seg2d/scripts/train.py \
+  --config seg2d/configs/fundus_avseg_unet.yaml \
+  --batch-size 2 \
+  --num-workers 4
+```
+
+`--batch-size` is per GPU, so the effective global batch size is
+`batch_size * nproc_per_node`.
+
 The default config enables train-time augmentation, CUDA AMP, cosine learning
 rate scheduling, per-class history metrics, and validation prediction overlays.
 
