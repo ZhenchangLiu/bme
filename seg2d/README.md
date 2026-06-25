@@ -85,3 +85,16 @@ Start baseline training:
 ```bash
 PYTHONPATH=seg2d python seg2d/scripts/train.py --config seg2d/configs/fundus_avseg_unet.yaml
 ```
+
+Evaluate the best checkpoint:
+
+```bash
+PYTHONPATH=seg2d python seg2d/scripts/evaluate.py --split test
+```
+
+Run prediction:
+
+```bash
+PYTHONPATH=seg2d python seg2d/scripts/predict.py \
+  --input seg2d/data/Fundus-AVSeg/images/001_G.png
+```
