@@ -11,6 +11,16 @@ data:
   val_fraction: 0.1
   image_size: [512, 512]
   ignore_index: 4
+  augmentation:
+    enabled: true
+    horizontal_flip_p: 0.5
+    vertical_flip_p: 0.5
+    rotate90_p: 0.5
+    color_jitter:
+      enabled: true
+      brightness: 0.1
+      contrast: 0.1
+      p: 0.8
 
 classes:
   - id: 0
@@ -42,6 +52,11 @@ train:
   num_workers: 4
   learning_rate: 0.001
   weight_decay: 0.0001
+  amp: true
+  scheduler:
+    enabled: true
+    name: cosine
+    min_lr: 0.00001
   loss:
     ce_weight: 1.0
     dice_weight: 1.0
@@ -49,3 +64,9 @@ train:
 output:
   root: seg2d/outputs/fundus_avseg_unet
   checkpoint_dir: seg2d/checkpoints/fundus_avseg_unet
+
+logging:
+  save_val_predictions: true
+  num_val_predictions: 4
+  prediction_interval: 1
+  overlay_alpha: 0.45

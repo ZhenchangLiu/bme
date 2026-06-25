@@ -60,6 +60,7 @@ Implemented dataset utilities:
 - `seg2d.models.unet`: hand-written PyTorch U-Net baseline.
 - `seg2d.losses`: cross-entropy plus Dice segmentation losses.
 - `seg2d.metrics`: per-class and merged-vessel Dice/IoU metrics.
+- `seg2d.datasets.transforms`: train-time paired augmentation for images and masks.
 
 With `val_fraction: 0.1`, the official 80 training images are split into 72
 training images and 8 validation images using the configured seed.
@@ -93,6 +94,9 @@ Start baseline training:
 ```bash
 PYTHONPATH=seg2d python seg2d/scripts/train.py --config seg2d/configs/fundus_avseg_unet.yaml
 ```
+
+The default training config enables paired augmentation, CUDA AMP, cosine LR
+scheduling, richer CSV metrics, and validation prediction overlays.
 
 Evaluate the best checkpoint:
 

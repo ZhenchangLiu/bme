@@ -31,6 +31,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=None, help="Override config train.learning_rate.")
     parser.add_argument("--device", default=None, help="Device string, for example cuda, cuda:0, or cpu.")
     parser.add_argument("--resume", type=Path, default=None, help="Resume checkpoint path.")
+    parser.add_argument("--no-amp", action="store_true", help="Disable automatic mixed precision.")
     parser.add_argument("--limit-train-batches", type=int, default=None, help="Debug limit for train batches.")
     parser.add_argument("--limit-val-batches", type=int, default=None, help="Debug limit for val batches.")
     return parser.parse_args()
@@ -90,13 +91,20 @@ def run_training(
         lr=float(train_config["learning_rate"]),
         weight_decay=float(train_config.get("weight_decay", 0.0)),
     )
+    scheduler = build_scheduler(config, optimizer)
+    amp_enabled = bool(train_config.get("amp", False)) and device.type == "cuda"
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
 
     start_epoch = 1
     best_vessel_dice = -1.0
     if resume_path is not None:
-        checkpoint = torch.load(resolve_path(resume_path), map_location=device)
+        checkpoint = load_checkpoint(resolve_path(resume_path), device)
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
+        if scheduler is not None and checkpoint.get("scheduler") is not None:
+            scheduler.load_state_dict(checkpoint["scheduler"])
+        if checkpoint.get("scaler") is not None:
+            scaler.load_state_dict(checkpoint["scaler"])
         start_epoch = int(checkpoint["epoch"]) + 1
         best_vessel_dice = float(checkpoint.get("best_vessel_dice", best_vessel_dice))
 
@@ -118,6 +126,8 @@ def run_training(
             device=device,
             num_classes=int(model_config.get("num_classes", 5)),
             ignore_index=int(data_config["ignore_index"]),
+            scaler=scaler,
+            amp_enabled=amp_enabled,
             max_batches=limit_train_batches,
         )
         val_metrics = evaluate(
@@ -127,8 +137,11 @@ def run_training(
             device=device,
             num_classes=int(model_config.get("num_classes", 5)),
             ignore_index=int(data_config["ignore_index"]),
+            amp_enabled=amp_enabled,
             max_batches=limit_val_batches,
         )
+        step_scheduler(scheduler, val_metrics)
+        learning_rate = optimizer.param_groups[0]["lr"]
 
         is_best = val_metrics["vessel_dice"] > best_vessel_dice
         if is_best:
@@ -138,6 +151,8 @@ def run_training(
             "epoch": epoch,
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict() if scheduler is not None else None,
+            "scaler": scaler.state_dict() if amp_enabled else None,
             "config": config,
             "best_vessel_dice": best_vessel_dice,
             "train_metrics": train_metrics,
@@ -147,9 +162,19 @@ def run_training(
         if is_best:
             save_checkpoint(checkpoint, checkpoint_dir / "best.pt")
 
-        row = flatten_history(epoch, train_metrics, val_metrics, best_vessel_dice)
+        maybe_save_val_predictions(
+            model=model,
+            loader=val_loader,
+            device=device,
+            output_dir=output_dir,
+            epoch=epoch,
+            config=config,
+            amp_enabled=amp_enabled,
+        )
+
+        row = flatten_history(epoch, train_metrics, val_metrics, best_vessel_dice, learning_rate)
         append_history(history_path, row)
-        print(format_epoch(epoch, epochs, train_metrics, val_metrics, best_vessel_dice))
+        print(format_epoch(epoch, epochs, train_metrics, val_metrics, best_vessel_dice, learning_rate))
         last_metrics = {"train": train_metrics, "val": val_metrics, "best_vessel_dice": best_vessel_dice}
 
     return {
@@ -166,6 +191,7 @@ def build_dataloaders(config: dict[str, Any]):
     from torch.utils.data import DataLoader
 
     from seg2d.datasets import FundusAVSegDataset
+    from seg2d.datasets.transforms import build_train_transform
 
     data_config = config["data"]
     train_config = config["train"]
@@ -186,6 +212,7 @@ def build_dataloaders(config: dict[str, Any]):
         val_fraction=val_fraction,
         seed=seed,
         return_meta=False,
+        transform=build_train_transform(config),
     )
     val_dataset = FundusAVSegDataset(
         root=root,
@@ -222,6 +249,8 @@ def train_one_epoch(
     device,
     num_classes: int,
     ignore_index: int | None,
+    scaler,
+    amp_enabled: bool,
     max_batches: int | None = None,
 ) -> dict[str, Any]:
     import torch
@@ -241,10 +270,16 @@ def train_one_epoch(
         masks = batch["mask"].to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        logits = model(images)
-        losses = criterion(logits, masks)
-        losses["loss"].backward()
-        optimizer.step()
+        with torch.cuda.amp.autocast(enabled=amp_enabled):
+            logits = model(images)
+            losses = criterion(logits, masks)
+        if amp_enabled:
+            scaler.scale(losses["loss"]).backward()
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            losses["loss"].backward()
+            optimizer.step()
 
         batch_size = images.size(0)
         total_samples += batch_size
@@ -274,6 +309,7 @@ def evaluate(
     device,
     num_classes: int,
     ignore_index: int | None,
+    amp_enabled: bool = False,
     max_batches: int | None = None,
 ) -> dict[str, Any]:
     import torch
@@ -292,8 +328,9 @@ def evaluate(
                 break
             images = batch["image"].to(device, non_blocking=True)
             masks = batch["mask"].to(device, non_blocking=True)
-            logits = model(images)
-            losses = criterion(logits, masks)
+            with torch.cuda.amp.autocast(enabled=amp_enabled):
+                logits = model(images)
+                losses = criterion(logits, masks)
 
             batch_size = images.size(0)
             total_samples += batch_size
@@ -413,6 +450,107 @@ def binary_scores(confusion: dict[str, Any], eps: float = 1e-7) -> tuple[float, 
     return dice, iou
 
 
+def build_scheduler(config: dict[str, Any], optimizer):
+    import torch
+
+    scheduler_config = config["train"].get("scheduler", {})
+    if not scheduler_config or not scheduler_config.get("enabled", False):
+        return None
+
+    name = str(scheduler_config.get("name", "cosine")).lower()
+    if name == "cosine":
+        return torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=int(scheduler_config.get("t_max", config["train"]["epochs"])),
+            eta_min=float(scheduler_config.get("min_lr", 0.0)),
+        )
+    if name == "plateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="max",
+            factor=float(scheduler_config.get("factor", 0.5)),
+            patience=int(scheduler_config.get("patience", 5)),
+        )
+    raise ValueError(f"Unsupported scheduler: {name}")
+
+
+def step_scheduler(scheduler, val_metrics: dict[str, Any]) -> None:
+    if scheduler is None:
+        return
+    if scheduler.__class__.__name__ == "ReduceLROnPlateau":
+        scheduler.step(val_metrics["vessel_dice"])
+    else:
+        scheduler.step()
+
+
+def maybe_save_val_predictions(
+    model,
+    loader,
+    device,
+    output_dir: Path,
+    epoch: int,
+    config: dict[str, Any],
+    amp_enabled: bool,
+) -> None:
+    logging_config = config.get("logging", {})
+    if not logging_config.get("save_val_predictions", False):
+        return
+
+    interval = int(logging_config.get("prediction_interval", 1))
+    if interval <= 0 or epoch % interval != 0:
+        return
+
+    import numpy as np
+    import torch
+    from PIL import Image
+
+    from seg2d.utils.mask import class_to_rgb
+
+    num_samples = int(logging_config.get("num_val_predictions", 4))
+    save_dir = output_dir / "val_predictions" / f"epoch_{epoch:04d}"
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    was_training = model.training
+    model.eval()
+    saved = 0
+    with torch.no_grad():
+        for batch in loader:
+            images = batch["image"].to(device, non_blocking=True)
+            masks = batch["mask"].to(device, non_blocking=True)
+            with torch.cuda.amp.autocast(enabled=amp_enabled):
+                logits = model(images)
+            predictions = torch.argmax(logits, dim=1)
+
+            for index in range(images.size(0)):
+                if saved >= num_samples:
+                    break
+                image = tensor_image_to_pil(images[index].detach().cpu())
+                target = Image.fromarray(class_to_rgb(masks[index].detach().cpu().numpy().astype(np.uint8)))
+                pred = Image.fromarray(class_to_rgb(predictions[index].detach().cpu().numpy().astype(np.uint8)))
+                overlay = Image.blend(image, pred, alpha=float(logging_config.get("overlay_alpha", 0.45)))
+
+                stem = f"sample_{saved:02d}"
+                image.save(save_dir / f"{stem}_image.png")
+                target.save(save_dir / f"{stem}_target.png")
+                pred.save(save_dir / f"{stem}_pred.png")
+                overlay.save(save_dir / f"{stem}_overlay.png")
+                saved += 1
+            if saved >= num_samples:
+                break
+
+    if was_training:
+        model.train()
+
+
+def tensor_image_to_pil(image) -> "Image.Image":
+    import numpy as np
+    from PIL import Image
+
+    array = image.clamp(0.0, 1.0).permute(1, 2, 0).numpy()
+    array = (array * 255.0).round().astype(np.uint8)
+    return Image.fromarray(array, mode="RGB")
+
+
 def load_config(path: Path) -> dict[str, Any]:
     try:
         import yaml
@@ -421,6 +559,15 @@ def load_config(path: Path) -> dict[str, Any]:
 
     with path.open("r", encoding="utf-8") as handle:
         return yaml.safe_load(handle)
+
+
+def load_checkpoint(path: Path, device):
+    import torch
+
+    try:
+        return torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=device)
 
 
 def apply_overrides(config: dict[str, Any], args: argparse.Namespace) -> None:
@@ -436,6 +583,8 @@ def apply_overrides(config: dict[str, Any], args: argparse.Namespace) -> None:
         config["train"]["limit_train_batches"] = args.limit_train_batches
     if args.limit_val_batches is not None:
         config["train"]["limit_val_batches"] = args.limit_val_batches
+    if args.no_amp:
+        config["train"]["amp"] = False
 
 
 def make_device(device_arg: str | None):
@@ -486,6 +635,7 @@ def flatten_history(
     train_metrics: dict[str, Any],
     val_metrics: dict[str, Any],
     best_vessel_dice: float,
+    learning_rate: float,
 ) -> dict[str, Any]:
     row = {
         "epoch": epoch,
@@ -500,9 +650,16 @@ def flatten_history(
         "val_vessel_dice": val_metrics["vessel_dice"],
         "val_vessel_iou": val_metrics["vessel_iou"],
         "best_vessel_dice": best_vessel_dice,
+        "learning_rate": learning_rate,
     }
+    for class_id, score in train_metrics["per_class_dice"].items():
+        row[f"train_dice_class_{class_id}"] = score
     for class_id, score in val_metrics["per_class_dice"].items():
         row[f"val_dice_class_{class_id}"] = score
+    for class_id, score in train_metrics["per_class_iou"].items():
+        row[f"train_iou_class_{class_id}"] = score
+    for class_id, score in val_metrics["per_class_iou"].items():
+        row[f"val_iou_class_{class_id}"] = score
     return row
 
 
@@ -512,6 +669,7 @@ def format_epoch(
     train_metrics: dict[str, Any],
     val_metrics: dict[str, Any],
     best_vessel_dice: float,
+    learning_rate: float,
 ) -> str:
     return (
         f"epoch {epoch}/{epochs} "
@@ -519,7 +677,8 @@ def format_epoch(
         f"val_loss={val_metrics['loss']:.6f} "
         f"val_vessel_dice={val_metrics['vessel_dice']:.6f} "
         f"val_vessel_iou={val_metrics['vessel_iou']:.6f} "
-        f"best_vessel_dice={best_vessel_dice:.6f}"
+        f"best_vessel_dice={best_vessel_dice:.6f} "
+        f"lr={learning_rate:.6g}"
     )
 
 

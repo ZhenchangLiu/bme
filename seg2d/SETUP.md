@@ -93,11 +93,20 @@ Short run:
 PYTHONPATH=seg2d python seg2d/scripts/train.py --epochs 2 --batch-size 1 --num-workers 0
 ```
 
+Disable AMP for debugging:
+
+```bash
+PYTHONPATH=seg2d python seg2d/scripts/train.py --epochs 2 --batch-size 1 --num-workers 0 --no-amp
+```
+
 Default config run:
 
 ```bash
 PYTHONPATH=seg2d python seg2d/scripts/train.py --config seg2d/configs/fundus_avseg_unet.yaml
 ```
+
+The default config enables train-time augmentation, CUDA AMP, cosine learning
+rate scheduling, per-class history metrics, and validation prediction overlays.
 
 Evaluate:
 
