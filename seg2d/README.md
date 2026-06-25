@@ -73,3 +73,15 @@ Run the loss/metrics smoke test:
 ```bash
 PYTHONPATH=seg2d python seg2d/scripts/smoke_loss_metrics.py
 ```
+
+Run the train-step smoke test:
+
+```bash
+PYTHONPATH=seg2d python seg2d/scripts/smoke_train_step.py
+```
+
+Start baseline training:
+
+```bash
+PYTHONPATH=seg2d python seg2d/scripts/train.py --config seg2d/configs/fundus_avseg_unet.yaml
+```

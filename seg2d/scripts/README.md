@@ -6,7 +6,8 @@ Planned command-line entry points:
 - `inspect_fundus_avseg.py`: inspect image, annotation, and metadata layout.
 - `smoke_forward.py`: run a one-batch dataset/model/loss/backward check.
 - `smoke_loss_metrics.py`: run a one-batch combined-loss and metrics check.
-- `train.py`: train the hand-written U-Net baseline.
+- `smoke_train_step.py`: run one train batch and one validation batch.
+- `train.py`: train the hand-written U-Net baseline and save checkpoints.
 - `evaluate.py`: evaluate checkpoints on the official test split.
 - `predict.py`: run single-image or folder inference with visualization output.
 
@@ -28,4 +29,16 @@ Run the loss/metrics smoke test:
 
 ```bash
 PYTHONPATH=seg2d python seg2d/scripts/smoke_loss_metrics.py
+```
+
+Run the train-step smoke test:
+
+```bash
+PYTHONPATH=seg2d python seg2d/scripts/smoke_train_step.py
+```
+
+Run baseline training:
+
+```bash
+PYTHONPATH=seg2d python seg2d/scripts/train.py --config seg2d/configs/fundus_avseg_unet.yaml
 ```
