@@ -56,6 +56,8 @@ Implemented dataset utilities:
 - `seg2d.utils.mask`: RGB annotation to class-id mask conversion.
 - `seg2d.datasets.fundus_avseg`: official split loading and PyTorch dataset adapter.
 - `seg2d.models.unet`: hand-written PyTorch U-Net baseline.
+- `seg2d.losses`: cross-entropy plus Dice segmentation losses.
+- `seg2d.metrics`: per-class and merged-vessel Dice/IoU metrics.
 
 With `val_fraction: 0.1`, the official 80 training images are split into 72
 training images and 8 validation images using the configured seed.
@@ -64,4 +66,10 @@ Run a one-batch smoke test:
 
 ```bash
 PYTHONPATH=seg2d python seg2d/scripts/smoke_forward.py
+```
+
+Run the loss/metrics smoke test:
+
+```bash
+PYTHONPATH=seg2d python seg2d/scripts/smoke_loss_metrics.py
 ```
