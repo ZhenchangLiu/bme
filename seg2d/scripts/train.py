@@ -93,7 +93,7 @@ def run_training(
     )
     scheduler = build_scheduler(config, optimizer)
     amp_enabled = bool(train_config.get("amp", False)) and device.type == "cuda"
-    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+    scaler = make_grad_scaler(device, amp_enabled)
 
     start_epoch = 1
     best_vessel_dice = -1.0
@@ -270,7 +270,7 @@ def train_one_epoch(
         masks = batch["mask"].to(device, non_blocking=True)
 
         optimizer.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=amp_enabled):
+        with autocast_context(device, amp_enabled):
             logits = model(images)
             losses = criterion(logits, masks)
         if amp_enabled:
@@ -328,7 +328,7 @@ def evaluate(
                 break
             images = batch["image"].to(device, non_blocking=True)
             masks = batch["mask"].to(device, non_blocking=True)
-            with torch.cuda.amp.autocast(enabled=amp_enabled):
+            with autocast_context(device, amp_enabled):
                 logits = model(images)
                 losses = criterion(logits, masks)
 
@@ -517,7 +517,7 @@ def maybe_save_val_predictions(
         for batch in loader:
             images = batch["image"].to(device, non_blocking=True)
             masks = batch["mask"].to(device, non_blocking=True)
-            with torch.cuda.amp.autocast(enabled=amp_enabled):
+            with autocast_context(device, amp_enabled):
                 logits = model(images)
             predictions = torch.argmax(logits, dim=1)
 
@@ -593,6 +593,22 @@ def make_device(device_arg: str | None):
     if device_arg is not None:
         return torch.device(device_arg)
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def make_grad_scaler(device, enabled: bool):
+    import torch
+
+    if hasattr(torch, "amp") and hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler(device.type, enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+
+def autocast_context(device, enabled: bool):
+    import torch
+
+    if hasattr(torch, "amp") and hasattr(torch.amp, "autocast"):
+        return torch.amp.autocast(device_type=device.type, enabled=enabled)
+    return torch.cuda.amp.autocast(enabled=enabled)
 
 
 def set_seed(seed: int) -> None:
