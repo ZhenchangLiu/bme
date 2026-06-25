@@ -6,6 +6,8 @@ The first target dataset is Fundus-AVSeg, a public retinal artery-vein vessel
 segmentation dataset. The initial implementation will use a hand-written PyTorch
 U-Net instead of `segmentation_models_pytorch` or similar model libraries.
 
+Server setup and reproducibility notes are in `SETUP.md`.
+
 ## Planned Layout
 
 ```text
@@ -78,6 +80,12 @@ Run the train-step smoke test:
 
 ```bash
 PYTHONPATH=seg2d python seg2d/scripts/smoke_train_step.py
+```
+
+Run the eval/predict smoke test after a checkpoint exists:
+
+```bash
+PYTHONPATH=seg2d python seg2d/scripts/smoke_eval_predict.py
 ```
 
 Start baseline training:

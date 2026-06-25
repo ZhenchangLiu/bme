@@ -1,0 +1,7 @@
+# Install PyTorch separately with the CUDA wheel that matches the server.
+numpy
+pillow
+pyyaml
+tqdm
+openpyxl
+matplotlib
